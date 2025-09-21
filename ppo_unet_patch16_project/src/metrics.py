@@ -1,3 +1,4 @@
+import torch
 def dice_coef(bin_pred: torch.Tensor, bin_gt: torch.Tensor, eps=1e-6) -> torch.Tensor:
     """
     bin_pred/bin_gt: [B,1,H,W] em {0,1}

@@ -37,16 +37,23 @@ def compute_returns_advantages(rews, vals, dones, gamma, lam):
     rews, vals, dones: [T, B]
     retorna: returns [T,B], adv [T,B]
     """
-    T, B = rews.shape
-    adv  = torch.zeros_like(rews)
-    lastgaelam = torch.zeros(B, device=rews.device)
-    for t in reversed(range(T-1)):
-        nonterm = 1.0 - dones[t+1]
-        delta   = rews[t] + gamma * vals[t+1] * nonterm - vals[t]
-        lastgaelam = delta + gamma * lam * nonterm * lastgaelam
-        adv[t] = lastgaelam
-    ret = adv + vals[:-1]
-    return ret, adv
+    if rews.ndim == 1:  # caso [T]
+        T = rews.shape[0]
+        B = 1
+        rews = rews.unsqueeze(1)
+        vals = vals.unsqueeze(1)
+        dones = dones.unsqueeze(1)
+    else:
+        T, B = rews.shape
+        adv  = torch.zeros_like(rews)
+        lastgaelam = torch.zeros(B, device=rews.device)
+        for t in reversed(range(T-1)):
+            nonterm = 1.0 - dones[t+1]
+            delta   = rews[t] + gamma * vals[t+1] * nonterm - vals[t]
+            lastgaelam = delta + gamma * lam * nonterm * lastgaelam
+            adv[t] = lastgaelam
+        ret = adv + vals[:-1]
+        return ret, adv
 
 def ppo_update(model: nn.Module,
                optimizer_pi, optimizer_v,

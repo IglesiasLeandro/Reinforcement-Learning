@@ -1,7 +1,7 @@
 import torch
 from .io_utils import set_seed
 from .config import PPOConfig
-from .model import ActorCriticUNet
+from .models import ActorCriticUNet
 from .ppo import RolloutBuffer, compute_returns_advantages, ppo_update
 from .metrics import dice_coef
 from .env import env_step
@@ -60,7 +60,14 @@ def train(device="cuda"):
 
             done_vec = torch.zeros(B, device=device)
             state = torch.cat([imgs, mask], dim=1)
-            buffer.add(state, actions, logp_sum, value, rew_vec, done_vec)
+            buffer.add(
+                state.detach(),
+                actions.detach(),
+                logp_sum.detach(),
+                value.detach(),
+                rew_vec.detach(),
+                done_vec.detach()
+            )
 
             mask = mask_next
 
@@ -86,19 +93,23 @@ def train(device="cuda"):
         returns = []
         advs = []
         for b in range(B):
-            ret_b, adv_b = compute_returns_advantages(rews[:, b], vals_plus[:, b], dones[:, b],
-                                                      gamma=cfg.gamma, lam=cfg.lam)
+            ret_b, adv_b = compute_returns_advantages(
+                rews[:, b].unsqueeze(1),
+                vals_plus[:, b].unsqueeze(1),
+                dones[:, b].unsqueeze(1),
+                gamma=cfg.gamma, lam=cfg.lam
+            )
             returns.append(ret_b.unsqueeze(1))
             advs.append(adv_b.unsqueeze(1))
         returns = torch.cat(returns, dim=1)
         advs    = torch.cat(advs, dim=1)
 
-        obs_train   = obs[:-1].reshape(-1, *obs.shape[2:])
-        acts_train  = acts[:-1].reshape(-1, acts.shape[2])
-        logp_train  = logp_old[:-1].reshape(-1)
-        vals_old    = vals[:-1].reshape(-1)
-        returns_tr  = returns.reshape(-1)
-        advs_tr     = advs.reshape(-1)
+        obs_train   = obs[:-1].reshape(-1, *obs.shape[2:]).detach()
+        acts_train  = acts[:-1].reshape(-1, acts.shape[2]).detach()
+        logp_train  = logp_old[:-1].reshape(-1).detach()
+        vals_old    = vals[:-1].reshape(-1).detach()
+        returns_tr  = returns.reshape(-1).detach()
+        advs_tr     = advs.reshape(-1).detach()
 
         advs_tr = (advs_tr - advs_tr.mean()) / (advs_tr.std() + 1e-8)
 

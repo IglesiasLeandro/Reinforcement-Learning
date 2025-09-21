@@ -1,5 +1,5 @@
 import torch
-from .model import ActorCriticUNet
+from .models import ActorCriticUNet
 from .actions import apply_actions_patchwise
 import torch.nn as nn
 

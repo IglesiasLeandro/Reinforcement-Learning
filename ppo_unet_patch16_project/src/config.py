@@ -17,3 +17,5 @@ class PPOConfig:
     horizon_T: int = 6
     max_epochs: int = 200
     grad_clip: float = 1.0
+    n_actions: int = N_ACTIONS
+    patch_size: int = PATCH_SIZE
