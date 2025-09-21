@@ -6,22 +6,41 @@ from .ppo import RolloutBuffer, compute_returns_advantages, ppo_update
 from .metrics import dice_coef
 from .env import env_step
 
+# importa seu dataset
+from data.BUSI.DataClass import get_busi_loaders
+
 def train(device="cuda"):
     set_seed(42)
     cfg = PPOConfig()
-    model = ActorCriticUNet(in_ch=2, base_ch=32, n_actions=cfg.__dict__.get("n_actions", None) or None).to(device)
-    # NOTE: model init will use default N_ACTIONS from model.py if not passed
+    model = ActorCriticUNet(
+        in_ch=2, base_ch=32,
+        n_actions=cfg.__dict__.get("n_actions", None) or None
+    ).to(device)
 
     optimizer_pi = torch.optim.Adam(model.parameters(), lr=cfg.pi_lr)
     optimizer_v  = torch.optim.Adam(model.parameters(), lr=cfg.vf_lr)
 
-    # >>> Substitua por seu DataLoader BUSI
-    def get_busi_batch():
-        B, H, W = 8, 256, 256
-        imgs = torch.rand(B,1,H,W, device=device)  # normalizada [0,1]
-        gts  = (torch.rand(B,1,H,W, device=device) > 0.7).float()
-        return imgs, gts
+    # ------------------------------
+    # usa DataLoader BUSI
+    # ------------------------------
+    root = "./data/BUSI"   # ajuste se precisar
+    train_loader, val_loader, test_loader = get_busi_loaders(
+        root, size=256, batch_size=cfg.batch_size, num_workers=0
+    )
+    train_iter = iter(train_loader)
 
+    def get_busi_batch():
+        nonlocal train_iter
+        try:
+            imgs, gts = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_loader)
+            imgs, gts = next(train_iter)
+        return imgs.to(device), gts.to(device)
+
+    # ------------------------------
+    # loop de treino PPO
+    # ------------------------------
     for epoch in range(1, cfg.max_epochs+1):
         model.eval()
         buffer = RolloutBuffer()
@@ -50,6 +69,9 @@ def train(device="cuda"):
                 _, v_last = model(last_state)
                 vals_bootstrap = v_last.squeeze(1)  # [B]
 
+        # ------------------------------
+        # PPO update
+        # ------------------------------
         obs, acts, logps_old, vals, rews, dones = buffer.cat(device)
         T = cfg.horizon_T
         obs  = obs.view(T, B, *obs.shape[1:])              # [T,B,2,H,W]
