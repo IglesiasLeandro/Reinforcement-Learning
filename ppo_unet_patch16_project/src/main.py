@@ -6,12 +6,15 @@ from data.BUSI.DataClass import get_busi_loaders
 from models import RLPixelNet_Pretrained as RLPixelNet
 from train import train_ppo_segmentation
 import torch.optim as optim
+import os, glob
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
+    root_dir = "data/BUSI"
+    
     # Caminho raiz da pasta BUSI
-    root_busi = os.path.join("data", "BUSI")
+    root_busi = os.path.join(os.path.dirname(__file__), "..", "data", "BUSI")
+    root_busi = os.path.abspath(root_busi)
 
     # Cria DataLoaders (train, val, test)
     train_loader, val_loader, test_loader = get_busi_loaders(
@@ -22,7 +25,7 @@ if __name__ == "__main__":
     )
 
     # Instancia o modelo
-    model = RLPixelNet(in_ch=2, base_ch=32, n_actions=3)
+    model = RLPixelNet()
     optimizer = optim.Adam(model.parameters(), lr=3e-4)
 
     # Treina com PPO

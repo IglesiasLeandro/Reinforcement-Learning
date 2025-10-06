@@ -118,21 +118,24 @@ class Rollout:
 def compute_gae(rews, vals, dones, gamma=0.99, lam=0.95):
     """
     rews:  [T, B]
-    vals:  [T+1, B]  (bootstrap no último)
-    dones: [T, B]    (1.0 se terminou, 0.0 se não)
-    Return:
-      advs:   [T, B]
-      rets G: [T, B]  (G_t = A_t + V_t)
+    vals:  [T+1, B] ou [T+1, B, 1]
+    dones: [T, B]
     """
+    # garante formato [T+1, B, 1]
+    if vals.ndim == 2:
+        vals = vals.unsqueeze(-1)
+
     T, B = rews.shape
     advs = torch.zeros(T, B, device=rews.device)
-    last_adv = torch.zeros(B, device=rews.device)
+    last_adv = torch.zeros(B, 1, device=rews.device)
+
     for t in reversed(range(T)):
-        mask = 1.0 - dones[t]    # 0 se done, 1 se continua
-        delta = rews[t] + gamma*vals[t+1].squeeze(1)*mask - vals[t].squeeze(1)
-        last_adv = delta + gamma*lam*mask*last_adv
-        advs[t] = last_adv
-    rets = advs + vals[:-1].squeeze(1)         # [T,B]
+        mask = 1.0 - dones[t].unsqueeze(1)
+        delta = rews[t].unsqueeze(1) + gamma * vals[t+1] * mask - vals[t]
+        last_adv = delta + gamma * lam * mask * last_adv
+        advs[t] = last_adv.squeeze(1)
+
+    rets = advs + vals[:-1].squeeze(2)
     return advs, rets
 
 
@@ -234,13 +237,14 @@ def train_ppo_segmentation(
             _, logp_joint = logprob_actions_from_logits(logits.detach(), actions)
 
             # aplica ações no ambiente
-            mask_next = apply_actions_pixelwise(mask, actions)
+            actions_up = F.interpolate(actions.unsqueeze(1).float(), size=mask.shape[-2:], mode="nearest").long().squeeze(1)
+            mask_next = apply_actions_pixelwise(mask, actions_up)
 
             # recompensa ΔIoU (escala por imagem)
             rew = reward_delta_iou(mask, mask_next, gt)  # [B]
 
             # done? (critério simples: IoU alto ou passo final)
-            done = ((iou(mask_next, gt) > 0.95).float() | torch.tensor([t==T-1], device=device).float()).float()  # [B]
+            done = ((iou(mask_next, gt) > 0.95) | torch.tensor([t == T - 1], device=device, dtype=torch.bool)).float() # [B]
 
             # guarda no buffer
             buffers.states.append(state.detach())
