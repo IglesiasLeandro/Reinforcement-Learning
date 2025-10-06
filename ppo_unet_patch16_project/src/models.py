@@ -1,57 +1,78 @@
 import torch
 import torch.nn as nn
-from .config import PATCH_SIZE, N_ACTIONS
+from torchvision.models import vgg16
 
-class ActorCriticUNet(nn.Module):
-    """
-    Encoder leve + cabeça de ator (logits por patch) + cabeça de crítico (valor escalar).
-    """
-    def __init__(self, in_ch=2, base_ch=32, n_actions=N_ACTIONS, patch_size=PATCH_SIZE):
+# ---------------------------------------------------------
+# Attention Block (bottleneck)
+# ---------------------------------------------------------
+class SelfAttention(nn.Module):
+    def __init__(self, ch):
         super().__init__()
-        self.patch_size = patch_size
-        self.n_actions  = n_actions
+        self.query = nn.Conv2d(ch, ch // 8, 1)
+        self.key   = nn.Conv2d(ch, ch // 8, 1)
+        self.value = nn.Conv2d(ch, ch, 1)
+        self.gamma = nn.Parameter(torch.zeros(1))
 
-        # Encoder (troque por sua U-Net encoder+skips se quiser)
-        self.enc = nn.Sequential(
-            nn.Conv2d(in_ch, base_ch, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(base_ch, base_ch, 3, padding=1),
+    def forward(self, x):
+        B, C, H, W = x.shape
+        q = self.query(x).view(B, -1, H*W)
+        k = self.key(x).view(B, -1, H*W)
+        attn = torch.softmax(torch.bmm(q.transpose(1,2), k), dim=-1)
+        v = self.value(x).view(B, -1, H*W)
+        out = torch.bmm(v, attn.transpose(1,2)).view(B, C, H, W)
+        return self.gamma * out + x
+
+# ---------------------------------------------------------
+# ConvBlock simples
+# ---------------------------------------------------------
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True)
         )
+    def forward(self, x): return self.block(x)
 
-        # Ator: logits densos -> agregamos por patch
-        self.actor_head = nn.Sequential(
-            nn.Conv2d(base_ch, base_ch, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(base_ch, self.n_actions, 1)
+# ---------------------------------------------------------
+# Modelo final: Encoder pré-treinado + Attention + Atores
+# ---------------------------------------------------------
+class RLPixelNet_Pretrained(nn.Module):
+    def __init__(self, in_ch=2, n_actions=3, base_ch=512):
+        super().__init__()
+
+        # ------------- Encoder VGG16 -------------
+        vgg = vgg16(weights="IMAGENET1K_V1").features
+        vgg[0] = nn.Conv2d(in_ch, 64, kernel_size=3, stride=1, padding=1)
+        self.encoder = vgg  # saída: [B, 512, H/32, W/32]
+
+        # ------------- Attention Block -------------
+        self.att = SelfAttention(base_ch)
+
+        # ------------- Actor (decoder) -------------
+        self.actor = nn.Sequential(
+            ConvBlock(base_ch, base_ch//2),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            ConvBlock(base_ch//2, base_ch//4),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            ConvBlock(base_ch//4, base_ch//8),
+            nn.Conv2d(base_ch//8, n_actions, 1)
         )
 
-        # Crítico: valor escalar
-        self.critic_head = nn.Sequential(
+        # ------------- Critic (decoder) -------------
+        self.critic = nn.Sequential(
+            ConvBlock(base_ch, base_ch//2),
+            ConvBlock(base_ch//2, base_ch//4),
+            ConvBlock(base_ch//4, base_ch//8),
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(base_ch, base_ch),
-            nn.ReLU(inplace=True),
-            nn.Linear(base_ch, 1)
+            nn.Linear(base_ch//8, 1)
         )
 
-    def forward(self, state: torch.Tensor):
-        """
-        state: [B,2,H,W] = concat(img, mask_t)
-        retorna:
-          logits_patch: [B, n_patches, n_actions]
-          value:        [B, 1]
-        """
-        feats = self.enc(state)                # [B,C,H,W]
-        logits_map = self.actor_head(feats)    # [B,n_actions,H,W]
-
-        B, A, H, W = logits_map.shape
-        ps = self.patch_size
-        # agregação de logits por patch (média)
-        logits_map = logits_map.view(B, A, H//ps, ps, W//ps, ps)
-        logits_map = logits_map.permute(0,2,4,1,3,5)          # [B,hb,wb,A,ps,ps]
-        logits_patch = logits_map.mean(dim=(4,5)).contiguous()# [B,hb,wb,A]
-        logits_patch = logits_patch.view(B, -1, A)            # [B,N,A]
-
-        value = self.critic_head(feats)        # [B,1]
-        return logits_patch, value
+    def forward(self, state):
+        feats = self.encoder(state)
+        feats = self.att(feats)
+        logits = self.actor(feats)   # [B, 3, H', W']
+        value  = self.critic(feats)  # [B, 1]
+        return logits, value
