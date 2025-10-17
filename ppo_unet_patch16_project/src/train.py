@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 
 
 
@@ -75,6 +76,31 @@ def apply_actions_pixelwise(mask_t: torch.Tensor, actions: torch.Tensor) -> torc
 
         out[b,0] = torch.from_numpy(new_m/255.0).to(device=device, dtype=torch.float32)
     return out
+
+
+def segmentation_metrics(pred_mask, gt_mask, threshold=0.5):
+    """
+    Calcula métricas globais entre a predição e a ground truth.
+    Ambos [B,1,H,W] em {0,1}.
+    """
+    pred = (pred_mask > threshold).float()
+    gt   = (gt_mask > threshold).float()
+
+    # Flatten para métricas clássicas
+    pred_flat = pred.view(-1).cpu().numpy()
+    gt_flat   = gt.view(-1).cpu().numpy()
+
+    acc  = accuracy_score(gt_flat, pred_flat)
+    prec = precision_score(gt_flat, pred_flat, zero_division=0)
+    rec  = recall_score(gt_flat, pred_flat, zero_division=0)
+    f1   = f1_score(gt_flat, pred_flat, zero_division=0)
+
+    return {
+        "accuracy": acc,
+        "precision": prec,
+        "recall": rec,
+        "f1": f1
+    }
 
 # IoU util
 def iou(mask, gt):  # ambos [B,1,H,W] float {0,1}
@@ -288,3 +314,38 @@ def train_ppo_segmentation(
             with torch.no_grad():
                 iou_final = iou(mask, gt).mean().item()
             print(f"[upd {update}] mean IoU(final)={iou_final:.4f}")
+
+    # === AVALIAÇÃO FINAL ===
+    print("\n=== Avaliação Final ===")
+    model.eval()
+    all_preds, all_gts = [], []
+
+    with torch.no_grad():
+        for img, gt in dataloader:
+            img, gt = img.to(device), gt.to(device)
+            mask = torch.zeros_like(gt)
+
+            # aplica a política T vezes (refinamento final)
+            for _ in range(T):
+                state = torch.cat([img, mask], dim=1)
+                logits, _ = model(state)
+                probs = F.softmax(logits, dim=1)
+                actions = probs.argmax(dim=1)  # ação mais provável por pixel
+                mask = apply_actions_pixelwise(mask, actions)
+
+            all_preds.append(mask)
+            all_gts.append(gt)
+
+    # concatena tudo
+    preds = torch.cat(all_preds, dim=0)
+    gts   = torch.cat(all_gts, dim=0)
+
+    # IoU médio
+    mean_iou = iou(preds, gts).mean().item()
+    metrics = segmentation_metrics(preds, gts)
+
+    print(f"Mean IoU: {mean_iou:.4f}")
+    print(f"Accuracy:  {metrics['accuracy']:.4f}")
+    print(f"Precision: {metrics['precision']:.4f}")
+    print(f"Recall:    {metrics['recall']:.4f}")
+    print(f"F1-score:  {metrics['f1']:.4f}")
