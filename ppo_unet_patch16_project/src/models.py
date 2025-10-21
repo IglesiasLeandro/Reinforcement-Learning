@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torchvision.models import vgg16
+from torchvision.models import vgg16, VGG16_Weights
 import torch.nn.functional as F
 from torchvision import models
 import torch.optim as optim
@@ -66,8 +66,24 @@ class PixelDRLSegmentationModel(nn.Module):
         super().__init__()
         
         # 1. Feature Extractor: VGG16 (metade dos canais como no paper)
-        vgg16 = models.vgg16(pretrained=pretrained)
-        self.features = nn.Sequential(*list(vgg16.features.children())[:23])
+        vgg = vgg16(weights=VGG16_Weights.IMAGENET1K_FEATURES if pretrained else None)
+        features = list(vgg.features.children())
+
+        first: nn.Conv2d = features[0]  # 3->64
+        new_first = nn.Conv2d(
+            in_channels=2, out_channels=first.out_channels,
+            kernel_size=first.kernel_size, stride=first.stride, padding=first.padding, bias=(first.bias is not None)
+        )
+
+        if pretrained:
+            # média sobre o eixo de canais e replica para 2 canais
+            w = first.weight.data.mean(dim=1, keepdim=True)  # [64,1,3,3]
+            new_first.weight.data = w.repeat(1, 2, 1, 1)     # [64,2,3,3]
+            if first.bias is not None:
+                new_first.bias.data = first.bias.data
+
+        features[0] = new_first
+        self.features = nn.Sequential(*features[:23])
         
         # Reduz canais pela metade (512 → 256)
         self.channel_reducer = nn.Conv2d(512, 256, kernel_size=1)
@@ -111,6 +127,6 @@ class PixelDRLSegmentationModel(nn.Module):
         value = self.value_net(features_upsampled)     # [B, 1, H, W]
         
         # Value global (média espacial)
-        value_global = value.mean(dim=(2, 3), keepdim=True)  # [B, 1, 1, 1]
-        
-        return logits, value_global.squeeze(-1).squeeze(-1)
+        value_global = value.mean(dim=(2, 3), keepdim=True)  # [B,1,1,1]
+        value_global = value_global.view(x.size(0), 1)       # [B,1]
+        return logits, value_global
