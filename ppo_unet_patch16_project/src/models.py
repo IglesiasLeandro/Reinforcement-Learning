@@ -1,78 +1,116 @@
 import torch
 import torch.nn as nn
 from torchvision.models import vgg16
+import torch.nn.functional as F
+from torchvision import models
+import torch.optim as optim
 
-# ---------------------------------------------------------
-# Attention Block (bottleneck)
-# ---------------------------------------------------------
-class SelfAttention(nn.Module):
-    def __init__(self, ch):
+# ============================================================
+# NOVO: Self-Attention Module (Paper Eq. 1)
+# ============================================================
+class SelfAttentionModule(nn.Module):
+    """
+    Self-Attention Module do paper PixelDRL-MG
+    M_att = Softmax(W ⊗ f_att + f_att)
+    """
+    def __init__(self, channels):
         super().__init__()
-        self.query = nn.Conv2d(ch, ch // 8, 1)
-        self.key   = nn.Conv2d(ch, ch // 8, 1)
-        self.value = nn.Conv2d(ch, ch, 1)
-        self.gamma = nn.Parameter(torch.zeros(1))
+        self.conv1x1 = nn.Conv2d(channels, channels, kernel_size=1)
+        
+    def forward(self, features):
+        # Eq. 1: M_att = Softmax(W⊗f + f)
+        x = self.conv1x1(features) + features  # Residual connection
+        attention_map = F.softmax(x, dim=1)
+        return features * attention_map
 
+
+# ============================================================
+# NOVO: Policy e Value Networks com Dilated Convolutions
+# ============================================================
+class PolicyNetworkDilated(nn.Module):
+    """Policy Network com dilated convolutions (Paper Sec. 3.3)"""
+    def __init__(self, in_channels, num_actions=2):
+        super().__init__()
+        # Todas as conv layers usam dilation=2 para campo receptivo maior
+        self.conv1 = nn.Conv2d(in_channels, 128, 3, padding=2, dilation=2)
+        self.conv2 = nn.Conv2d(128, 64, 3, padding=2, dilation=2)
+        self.conv3 = nn.Conv2d(64, num_actions, 3, padding=2, dilation=2)
+        
     def forward(self, x):
-        B, C, H, W = x.shape
-        q = self.query(x).view(B, -1, H*W)
-        k = self.key(x).view(B, -1, H*W)
-        attn = torch.softmax(torch.bmm(q.transpose(1,2), k), dim=-1)
-        v = self.value(x).view(B, -1, H*W)
-        out = torch.bmm(v, attn.transpose(1,2)).view(B, C, H, W)
-        return self.gamma * out + x
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        logits = self.conv3(x)  # [B, num_actions, H, W]
+        return logits
 
-# ---------------------------------------------------------
-# ConvBlock simples
-# ---------------------------------------------------------
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch, out_ch):
+
+class ValueNetworkDilated(nn.Module):
+    """Value Network com dilated convolutions (Paper Sec. 3.3)"""
+    def __init__(self, in_channels):
         super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True)
-        )
-    def forward(self, x): return self.block(x)
+        self.conv1 = nn.Conv2d(in_channels, 128, 3, padding=2, dilation=2)
+        self.conv2 = nn.Conv2d(128, 64, 3, padding=2, dilation=2)
+        self.conv3 = nn.Conv2d(64, 1, 3, padding=2, dilation=2)
+        
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        value = self.conv3(x)  # [B, 1, H, W]
+        return value
 
-# ---------------------------------------------------------
-# Modelo final: Encoder pré-treinado + Attention + Atores
-# ---------------------------------------------------------
-class RLPixelNet_Pretrained(nn.Module):
-    def __init__(self, in_ch=2, n_actions=3, base_ch=512):
+class PixelDRLSegmentationModel(nn.Module):
+    """
+    Arquitetura inspirada no paper PixelDRL-MG:
+    Input → VGG16 → SAM → Policy/Value Networks (com Dilated Convs)
+    """
+    def __init__(self, num_actions=2, pretrained=True):
         super().__init__()
-
-        # ------------- Encoder VGG16 -------------
-        vgg = vgg16(weights="IMAGENET1K_V1").features
-        vgg[0] = nn.Conv2d(in_ch, 64, kernel_size=3, stride=1, padding=1)
-        self.encoder = vgg  # saída: [B, 512, H/32, W/32]
-
-        # ------------- Attention Block -------------
-        self.att = SelfAttention(base_ch)
-
-        # ------------- Actor (decoder) -------------
-        self.actor = nn.Sequential(
-            ConvBlock(base_ch, base_ch//2),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            ConvBlock(base_ch//2, base_ch//4),
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            ConvBlock(base_ch//4, base_ch//8),
-            nn.Conv2d(base_ch//8, n_actions, 1)
+        
+        # 1. Feature Extractor: VGG16 (metade dos canais como no paper)
+        vgg16 = models.vgg16(pretrained=pretrained)
+        self.features = nn.Sequential(*list(vgg16.features.children())[:23])
+        
+        # Reduz canais pela metade (512 → 256)
+        self.channel_reducer = nn.Conv2d(512, 256, kernel_size=1)
+        
+        # 2. Self-Attention Module (Paper Sec. 3.2)
+        self.self_attention = SelfAttentionModule(channels=256)
+        
+        # 3. Policy Network com Dilated Convolutions (Paper Sec. 3.3)
+        self.policy_net = PolicyNetworkDilated(
+            in_channels=256,  # Features do VGG + SAM
+            num_actions=num_actions
         )
-
-        # ------------- Critic (decoder) -------------
-        self.critic = nn.Sequential(
-            ConvBlock(base_ch, base_ch//2),
-            ConvBlock(base_ch//2, base_ch//4),
-            ConvBlock(base_ch//4, base_ch//8),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(base_ch//8, 1)
+        
+        # 4. Value Network com Dilated Convolutions
+        self.value_net = ValueNetworkDilated(in_channels=256)
+        
+    def forward(self, x):
+        """
+        x: [B, 2, H, W] (img + mask concatenados)
+        Returns: logits [B, 2, H, W], value [B, 1]
+        """
+        # Extrai features com VGG
+        features = self.features(x)  # [B, 512, H/16, W/16]
+        
+        # Reduz canais
+        features = self.channel_reducer(features)  # [B, 256, H/16, W/16]
+        
+        # Aplica Self-Attention
+        features = self.self_attention(features)  # [B, 256, H/16, W/16]
+        
+        # Upsampling para resolução original (se necessário)
+        features_upsampled = F.interpolate(
+            features, 
+            size=x.shape[-2:], 
+            mode='bilinear', 
+            align_corners=False
         )
-
-    def forward(self, state):
-        feats = self.encoder(state)
-        feats = self.att(feats)
-        logits = self.actor(feats)   # [B, 3, H', W']
-        value  = self.critic(feats)  # [B, 1]
-        return logits, value
+        
+        # Policy e Value
+        logits = self.policy_net(features_upsampled)  # [B, 2, H, W]
+        value = self.value_net(features_upsampled)     # [B, 1, H, W]
+        
+        # Value global (média espacial)
+        value_global = value.mean(dim=(2, 3), keepdim=True)  # [B, 1, 1, 1]
+        
+        return logits, value_global.squeeze(-1).squeeze(-1)
